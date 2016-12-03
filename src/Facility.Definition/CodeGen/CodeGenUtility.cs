@@ -18,7 +18,15 @@
 		/// </summary>
 		public static string Capitalize(string value)
 		{
-			return value.Length == 0 ? "" : value.Substring(0, 1).ToUpperInvariant() + value.Substring(1);
+			return string.IsNullOrEmpty(value) ? value : value.Substring(0, 1).ToUpperInvariant() + value.Substring(1);
+		}
+
+		/// <summary>
+		/// Uncapitalizes the specified string.
+		/// </summary>
+		public static string Uncapitalize(string value)
+		{
+			return string.IsNullOrEmpty(value) ? value : value.Substring(0, 1).ToLowerInvariant() + value.Substring(1);
 		}
 	}
 }

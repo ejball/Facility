@@ -35,14 +35,14 @@ namespace Facility.Definition.Swagger
 				return new CodeGenOutput(CreateNamedText("swagger.yaml", code =>
 				{
 					var yamlObject = ConvertJTokenToObject(JToken.FromObject(swaggerService, JsonSerializer.Create(SwaggerUtility.JsonSerializerSettings)));
-					new YamlDotNet.Serialization.SerializerBuilder().DisableAliases().EmitDefaults().WithEventEmitter(x => new OurEventEmitter(x)).Build().Serialize(code.TextWriter, yamlObject);
+					new SerializerBuilder().DisableAliases().EmitDefaults().WithEventEmitter(x => new OurEventEmitter(x)).Build().Serialize(code.TextWriter, yamlObject);
 				}));
 			}
 			else
 			{
 				return new CodeGenOutput(CreateNamedText("swagger.json", code =>
 				{
-					using (JsonTextWriter jsonTextWriter = new JsonTextWriter(code.TextWriter) { Formatting = Formatting.Indented, CloseOutput = false })
+					using (var jsonTextWriter = new JsonTextWriter(code.TextWriter) { Formatting = Formatting.Indented, CloseOutput = false })
 						JsonSerializer.Create(SwaggerUtility.JsonSerializerSettings).Serialize(jsonTextWriter, swaggerService);
 				}));
 			}
@@ -56,8 +56,9 @@ namespace Facility.Definition.Swagger
 			{
 				Info = new SwaggerInfo
 				{
-					Title = service.Name,
-					Description = GetSummaryOrNull(service),
+					Identifier = service.Name,
+					Title = GetSummaryOrNull(service) ?? service.Name,
+					Description = GetRemarksOrNull(service),
 					Version = service.TryGetAttribute("info")?.TryGetParameterValue("version") ?? "0.0.0",
 					CodeGen = CodeGenUtility.GetCodeGenComment(GeneratorName),
 				}
@@ -105,7 +106,7 @@ namespace Facility.Definition.Swagger
 
 			var definitions = new Dictionary<string, SwaggerSchema>();
 			foreach (var dtoInfo in dtoInfos.Values)
-				definitions[dtoInfo.Name] = GetDtoSwaggerType(service, dtoInfo.Fields);
+				definitions[dtoInfo.Name] = GetDtoSchema(service, dtoInfo);
 			swaggerService.Definitions = definitions.Count == 0 ? null : definitions;
 
 			return swaggerService;
@@ -170,6 +171,16 @@ namespace Facility.Definition.Swagger
 			return info.Summary.Length == 0 ? null : info.Summary;
 		}
 
+		private static string GetRemarksOrNull(IServiceMemberInfo info)
+		{
+			return info.Remarks.Count == 0 ? null : string.Join("\n", info.Remarks);
+		}
+
+		private static bool? GetObsoleteOrNull(IServiceElementInfo info)
+		{
+			return info.IsObsolete() ? true : default(bool?);
+		}
+
 		private static ServiceDtoInfo GetErrorDto()
 		{
 			return new ServiceDtoInfo(name: "Error",
@@ -208,6 +219,7 @@ namespace Facility.Definition.Swagger
 			var operation = new SwaggerOperation
 			{
 				Summary = GetSummaryOrNull(methodInfo),
+				Description = GetRemarksOrNull(methodInfo),
 				OperationId = methodInfo.Name,
 			};
 
@@ -216,13 +228,16 @@ namespace Facility.Definition.Swagger
 			if (httpMethodInfo.ValidResponses.Any(x => (x.NormalFields != null && x.NormalFields.Count != 0) || (x.BodyField != null && service.GetFieldType(x.BodyField.ServiceField).Kind == ServiceTypeKind.Dto)))
 				operation.Produces = new[] { "application/json" };
 
-			var parameters = new List<SwaggerSchema>();
+			var parameters = new List<SwaggerParameter>();
 
 			foreach (var httpPathInfo in httpMethodInfo.PathFields)
 				parameters.Add(CreateSwaggerParameter(service, httpPathInfo.ServiceField, SwaggerParameterKind.Path, httpPathInfo.ServiceField.Name));
 
 			foreach (var httpQueryInfo in httpMethodInfo.QueryFields)
 				parameters.Add(CreateSwaggerParameter(service, httpQueryInfo.ServiceField, SwaggerParameterKind.Query, httpQueryInfo.Name));
+
+			foreach (var httpHeaderInfo in httpMethodInfo.RequestHeaderFields)
+				parameters.Add(CreateSwaggerParameter(service, httpHeaderInfo.ServiceField, SwaggerParameterKind.Header, httpHeaderInfo.Name));
 
 			var requestBodyFieldType = httpMethodInfo.RequestBodyField == null ? null : service.GetFieldType(httpMethodInfo.RequestBodyField.ServiceField);
 			if (requestBodyFieldType != null && requestBodyFieldType.Kind == ServiceTypeKind.Dto)
@@ -241,11 +256,11 @@ namespace Facility.Definition.Swagger
 				var bodyField = validResponse.BodyField;
 				var bodyFieldType = bodyField == null ? null : service.GetFieldType(bodyField.ServiceField);
 				if (bodyField != null)
-					responses[statusCodeString] = CreateSwaggerResponse(bodyFieldType.Dto, bodyField.ServiceField.Summary);
+					responses[statusCodeString] = CreateSwaggerResponse(bodyFieldType.Dto, bodyField.ServiceField.Name, bodyField.ServiceField.Summary);
 				else if (validResponse.NormalFields != null && validResponse.NormalFields.Count != 0)
 					responses[statusCodeString] = CreateSwaggerResponse(TryCreateMethodResponseBodyDto(httpMethodInfo, validResponse));
 				else
-					responses[statusCodeString] = new SwaggerResponse { Description = "Success." };
+					responses[statusCodeString] = CreateSwaggerResponse();
 			}
 
 			operation.Responses = responses;
@@ -279,138 +294,146 @@ namespace Facility.Definition.Swagger
 			}
 		}
 
-		private static SwaggerSchema CreateSwaggerParameter(ServiceInfo service, ServiceFieldInfo fieldInfo, string inKind, string name)
+		private static SwaggerParameter CreateSwaggerParameter(ServiceInfo service, ServiceFieldInfo fieldInfo, string inKind, string name)
 		{
-			var parameterObject = GetSwaggerType(service.GetFieldType(fieldInfo));
+			var parameterObject = GetTypeSchema<SwaggerParameter>(service.GetFieldType(fieldInfo));
 			parameterObject.In = inKind;
 			parameterObject.Name = name ?? fieldInfo.Name;
+			if (parameterObject.Name != fieldInfo.Name)
+				parameterObject.Identifier = fieldInfo.Name;
 			parameterObject.Description = GetSummaryOrNull(fieldInfo);
 			parameterObject.Required = inKind == SwaggerParameterKind.Path;
+			parameterObject.Obsolete = GetObsoleteOrNull(fieldInfo);
 			return parameterObject;
 		}
 
-		private static SwaggerSchema CreateSwaggerRequestBodyParameter(ServiceDtoInfo dto, string name, string description = null)
+		private static SwaggerParameter CreateSwaggerRequestBodyParameter(ServiceDtoInfo dto, string name, string description = null)
 		{
-			return new SwaggerSchema
+			return new SwaggerParameter
 			{
 				In = SwaggerParameterKind.Body,
 				Name = name,
-				Description = !string.IsNullOrWhiteSpace(description) ? description : "The request body.",
+				Description = description,
 				Required = true,
-				Schema = GetDtoTypeRef(dto),
+				Schema = GetDtoSchemaRef<SwaggerSchema>(dto),
 			};
 		}
 
-		private static SwaggerResponse CreateSwaggerResponse(ServiceDtoInfo dto, string description = null)
+		private static SwaggerResponse CreateSwaggerResponse(ServiceDtoInfo dto = null, string identifier = null, string description = null)
 		{
 			return new SwaggerResponse
 			{
-				Description = !string.IsNullOrWhiteSpace(description) ? description : dto != null ? "The response body." : "Success.",
-				Schema = dto != null ? GetDtoTypeRef(dto) : null,
+				Description = description,
+				Schema = dto != null ? GetDtoSchemaRef<SwaggerSchema>(dto) : null,
+				Identifier = identifier,
 			};
 		}
 
-		private static SwaggerSchema GetSwaggerType(ServiceTypeInfo type)
+		private static T GetTypeSchema<T>(ServiceTypeInfo type) where T : ISwaggerSchema, new()
 		{
 			switch (type.Kind)
 			{
 			case ServiceTypeKind.String:
-				return new SwaggerSchema { Type = SwaggerSchemaType.String };
+				return new T { Type = SwaggerSchemaType.String };
 			case ServiceTypeKind.Boolean:
-				return new SwaggerSchema { Type = SwaggerSchemaType.Boolean };
+				return new T { Type = SwaggerSchemaType.Boolean };
 			case ServiceTypeKind.Double:
-				return new SwaggerSchema { Type = SwaggerSchemaType.Number, Format = SwaggerSchemaTypeFormat.Double };
+				return new T { Type = SwaggerSchemaType.Number, Format = SwaggerSchemaTypeFormat.Double };
 			case ServiceTypeKind.Int32:
-				return new SwaggerSchema { Type = SwaggerSchemaType.Integer, Format = SwaggerSchemaTypeFormat.Int32 };
+				return new T { Type = SwaggerSchemaType.Integer, Format = SwaggerSchemaTypeFormat.Int32 };
 			case ServiceTypeKind.Int64:
-				return new SwaggerSchema { Type = SwaggerSchemaType.Integer, Format = SwaggerSchemaTypeFormat.Int64 };
+				return new T { Type = SwaggerSchemaType.Integer, Format = SwaggerSchemaTypeFormat.Int64 };
 			case ServiceTypeKind.Bytes:
-				return new SwaggerSchema { Type = SwaggerSchemaType.String, Format = SwaggerSchemaTypeFormat.Byte };
+				return new T { Type = SwaggerSchemaType.String, Format = SwaggerSchemaTypeFormat.Byte };
 			case ServiceTypeKind.Object:
-				return new SwaggerSchema { Type = SwaggerSchemaType.Object };
+				return new T { Type = SwaggerSchemaType.Object };
 			case ServiceTypeKind.Error:
-				return GetErrorTypeRef();
+				return GetErrorSchemaRef<T>();
 			case ServiceTypeKind.Dto:
-				return GetDtoTypeRef(type.Dto);
+				return GetDtoSchemaRef<T>(type.Dto);
 			case ServiceTypeKind.Enum:
-				return GetEnumType(type.Enum);
+				return GetEnumSchema<T>(type.Enum);
 			case ServiceTypeKind.Result:
-				return GetResultOfTypeRef(type.ValueType);
+				return GetResultOfSchemaRef<T>(type.ValueType);
 			case ServiceTypeKind.Array:
-				return GetArrayOfType(type.ValueType);
+				return GetArrayOfSchema<T>(type.ValueType);
 			case ServiceTypeKind.Map:
-				return GetMapOfType(type.ValueType);
+				return (T) (object) GetMapOfSchema(type.ValueType);
 			default:
 				throw new InvalidOperationException("Unexpected field type kind: " + type.Kind);
 			}
 		}
 
-		private static SwaggerSchema GetDtoTypeRef(ServiceDtoInfo dtoInfo)
-		{
-			return new SwaggerSchema
-			{
-				Ref = "#/definitions/" + dtoInfo.Name,
-			};
-		}
-
-		private static SwaggerSchema GetEnumType(ServiceEnumInfo enumInfo)
-		{
-			return new SwaggerSchema
-			{
-				Type = SwaggerSchemaType.String,
-				Enum = enumInfo.Values.Select(x => (JToken) x.Name).ToList(),
-			};
-		}
-
-		private static SwaggerSchema GetErrorTypeRef()
-		{
-			return new SwaggerSchema
-			{
-				Ref = "#/definitions/Error",
-			};
-		}
-
-		private static SwaggerSchema GetResultOfTypeRef(ServiceTypeInfo type)
-		{
-			return new SwaggerSchema
-			{
-				Ref = "#/definitions/" + type.Dto.Name + "Result",
-			};
-		}
-
-		private static SwaggerSchema GetArrayOfType(ServiceTypeInfo type)
-		{
-			return new SwaggerSchema
-			{
-				Type = SwaggerSchemaType.Array,
-				Items = GetSwaggerType(type),
-			};
-		}
-
-		private static SwaggerSchema GetMapOfType(ServiceTypeInfo type)
-		{
-			return new SwaggerSchema
-			{
-				Type = SwaggerSchemaType.Object,
-				AdditionalProperties = GetSwaggerType(type),
-			};
-		}
-
-		private static SwaggerSchema GetDtoSwaggerType(ServiceInfo service, IEnumerable<ServiceFieldInfo> fieldInfos)
+		private static SwaggerSchema GetDtoSchema(ServiceInfo serviceInfo, ServiceDtoInfo dtoInfo)
 		{
 			var propertiesObject = new Dictionary<string, SwaggerSchema>();
 
-			foreach (var fieldInfo in fieldInfos)
+			foreach (var fieldInfo in dtoInfo.Fields)
 			{
-				SwaggerSchema propertyObject = GetSwaggerType(service.GetFieldType(fieldInfo));
+				SwaggerSchema propertyObject = GetTypeSchema<SwaggerSchema>(serviceInfo.GetFieldType(fieldInfo));
 				propertyObject.Description = GetSummaryOrNull(fieldInfo);
+				propertyObject.Obsolete = GetObsoleteOrNull(fieldInfo);
 				propertiesObject[fieldInfo.Name] = propertyObject;
 			}
 
 			return new SwaggerSchema
 			{
 				Type = SwaggerSchemaType.Object,
+				Description = GetSummaryOrNull(dtoInfo),
 				Properties = propertiesObject,
+				Obsolete = GetObsoleteOrNull(dtoInfo),
+				Remarks = GetRemarksOrNull(dtoInfo),
+			};
+		}
+
+		private static T GetDtoSchemaRef<T>(ServiceDtoInfo dtoInfo) where T : ISwaggerSchema, new()
+		{
+			return new T
+			{
+				Ref = "#/definitions/" + dtoInfo.Name,
+			};
+		}
+
+		private static T GetEnumSchema<T>(ServiceEnumInfo enumInfo) where T : ISwaggerSchema, new()
+		{
+			return new T
+			{
+				Type = SwaggerSchemaType.String,
+				Enum = enumInfo.Values.Select(x => (JToken) x.Name).ToList(),
+			};
+		}
+
+		private static T GetErrorSchemaRef<T>() where T : ISwaggerSchema, new()
+		{
+			return new T
+			{
+				Ref = "#/definitions/Error",
+			};
+		}
+
+		private static T GetResultOfSchemaRef<T>(ServiceTypeInfo type) where T : ISwaggerSchema, new()
+		{
+			return new T
+			{
+				Ref = "#/definitions/" + type.Dto.Name + "Result",
+			};
+		}
+
+		private static T GetArrayOfSchema<T>(ServiceTypeInfo type) where T : ISwaggerSchema, new()
+		{
+			return new T
+			{
+				Type = SwaggerSchemaType.Array,
+				Items = GetTypeSchema<SwaggerSchema>(type),
+			};
+		}
+
+		private static SwaggerSchema GetMapOfSchema(ServiceTypeInfo type)
+		{
+			return new SwaggerSchema
+			{
+				Type = SwaggerSchemaType.Object,
+				AdditionalProperties = GetTypeSchema<SwaggerSchema>(type),
 			};
 		}
 

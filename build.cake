@@ -49,6 +49,10 @@ void CodeGen(bool verify)
 		@"example\ExampleApi.fsd example\swagger\ --swagger" + (verify ? " --verify" : ""));
 	ExecuteProcess($@"src\fsdgenfsd\bin\{configuration}\fsdgenfsd.exe",
 		@"example\ExampleApi.fsd example\swagger\ --swagger --yaml" + (verify ? " --verify" : ""));
+	ExecuteProcess($@"src\fsdgenfsd\bin\{configuration}\fsdgenfsd.exe",
+		@"example\swagger\swagger.json example\swagger\fsd\" + (verify ? " --verify" : ""));
+	ExecuteProcess($@"src\fsdgenfsd\bin\{configuration}\fsdgenfsd.exe",
+		@"example\swagger\swagger.yaml example\swagger\fsd\ --verify");
 }
 
 Task("Clean")
